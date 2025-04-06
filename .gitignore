@@ -1,0 +1,19 @@
+# Ignore Python virtual environment
+medenv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+.env
+
+# Ignore editor/IDE configs
+.vscode/
+.idea/
+
+# Ignore system files
+.DS_Store
+
+# Ignore ChromaDB & outputs
+chroma_db_fresh/
+outputs/user_manuals/

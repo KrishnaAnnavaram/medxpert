@@ -1,0 +1,17 @@
+streamlit
+psycopg2-binary
+sqlalchemy
+pandas
+openai
+langchain
+tiktoken
+python-dotenv
+requests
+beautifulsoup4
+googletrans==4.0.0-rc1
+lxml
+html5lib
+reportlab
+pandas
+chromadb
+sentence-transformers 

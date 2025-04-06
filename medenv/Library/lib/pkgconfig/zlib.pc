@@ -1,0 +1,13 @@
+prefix=E:/Projects/5810/medxpert/medenv/Library
+exec_prefix=E:/Projects/5810/medxpert/medenv/Library
+libdir=E:/Projects/5810/medxpert/medenv/Library/lib
+sharedlibdir=E:/Projects/5810/medxpert/medenv/Library/lib
+includedir=E:/Projects/5810/medxpert/medenv/Library/include
+
+Name: zlib
+Description: zlib compression library
+Version: 1.2.13
+
+Requires:
+Libs: -L${libdir} -L${sharedlibdir} -lz
+Cflags: -I${includedir}
