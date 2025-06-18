@@ -1,0 +1,41 @@
+# 🐍 Python virtual environment
+medenv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 🔐 Environment files
+.env
+*.env
+
+# 💾 Data & model outputs
+data/
+output/
+outputs/
+outputs/user_manuals/
+qdrant_data/
+chroma_db_fresh/
+temp_extracted/
+database/
+*.csv
+*.json
+*.log
+*.zip
+*.db
+*.h5
+*.pt
+
+# 📸 Media
+*.jpg
+*.jpeg
+*.png
+
+# ⚙️ Editor and system files
+.vscode/
+.idea/
+.DS_Store
+
+# 🔄 Cache
+*.cache
+*.bak
