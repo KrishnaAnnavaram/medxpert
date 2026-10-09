@@ -80,6 +80,7 @@ This README is the **one location that explains all of MedXpert**. It gives thes
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one symptom query](#42-the-life-cycle-of-one-symptom-query)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 💬 [The chat app](#5-the-chat-app)
 6. 🧠 [The LLM agent](#6-the-llm-agent)
 7. 🗄️ [The SQL agent and the medicines table](#7-the-sql-agent-and-the-medicines-table)
@@ -164,6 +165,48 @@ The repository has three parts:
 | OCR test script | `ocr_to_fields.py` | Read the first image of one SPL ZIP file with Tesseract and print the clean text |
 | Presentation | `MedXpert.pptx` | 17-slide project deck: problem, literature, design, datasets, results, references |
 
+The component map shows which file calls which file. An arrow points from the caller to the file or store that it uses. The three parts share no code.
+
+```mermaid
+flowchart TB
+    subgraph CHAT["Chat app"]
+        APP["app.py<br/>Home, User Manual, About"]
+        LLM["agents/llm_agent.py<br/>classify_input_type, generate_general_reply,<br/>rephrase_symptom_for_sql, summarize_medicines"]
+        SQLA["agents/sql_agent.py<br/>generate_sql_query"]
+        DBC["database/db_connection.py<br/>run_sql_query, not committed"]
+        PAGE["pages/1_User_Manual.py"]
+        GEN["modules/user_manual_generator.py<br/>generate_user_manual"]
+    end
+    subgraph VEC["Vector search tools"]
+        BQ["build_qdrant.py"]
+        QS["qdrant_search_app.py"]
+        VT["vector_test.py"]
+        CS["chroma_test_app.py"]
+    end
+    subgraph ING["Label ingestion"]
+        DI["dailymed_ingest_qdrant.py"]
+        OCR["ocr_to_fields.py"]
+    end
+    OAI(["OpenAI API"])
+    PG[("PostgreSQL<br/>medicines_table")]
+    QD[("Qdrant<br/>medxpert_medicines")]
+    CH[("ChromaDB<br/>drug_images")]
+
+    APP --> LLM
+    APP --> SQLA
+    APP --> DBC
+    PAGE --> GEN
+    LLM --> OAI
+    SQLA --> OAI
+    GEN --> OAI
+    DBC --> PG
+    BQ --> QD
+    DI --> QD
+    QS --> QD
+    VT --> QD
+    CS --> CH
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -223,6 +266,18 @@ Each chat message goes to `classify_input_type` first. GPT-4 at temperature 0 re
 ### 3.2 Medicine facts come from the table
 The chat app does not ask GPT-4 to name medicines. GPT-4 writes the SQL, and the medicine names, compositions, uses and side effects come from the rows of `medicines_table`. GPT-4 then writes the explanation of those rows.
 
+```mermaid
+flowchart LR
+    PH[/"Clinical phrase"/] --> G1["GPT-4 writes<br/>the SQL text only"]
+    G1 --> RUN["run_sql_query"]
+    PG[("medicines_table")] --> RUN
+    RUN --> ROWS[/"Rows: Medicine_Name, Composition,<br/>Uses, Side_effects, Image_URL,<br/>Manufacturer, Excellent_Review_Percent"/]
+    ROWS --> G2["GPT-4 writes the<br/>explanation of each row"]
+    ROWS --> CARD["Card name and image<br/>come from the row"]
+    G2 --> OUT[/"Medicine card"/]
+    CARD --> OUT
+```
+
 ### 3.3 A symptom becomes a clinical keyword before the SQL step
 `rephrase_symptom_for_sql` changes the words of the user into a short clinical phrase, for example "burning chest" to "acid reflux". The app shows this phrase as "Interpreted Symptom".
 
@@ -245,24 +300,66 @@ The OpenAI key comes from `OPENAI_API_KEY` in a local `.env` file. Git ignores `
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
-    MSG["st.chat_input message"] --> HIST["Add to st.session_state.chat_history"]
-    HIST --> CLS["classify_input_type (gpt-4, temperature 0)"]
+flowchart TD
+    MSG[/"st.chat_input message"/] --> HIST["Add to st.session_state.chat_history"]
+    HIST --> CLS{"classify_input_type (gpt-4, temperature 0)"}
     CLS -- "general_chat" --> GEN["generate_general_reply (gpt-4, temperature 0.7)"]
     CLS -- "symptom_query" --> REP["rephrase_symptom_for_sql (gpt-4, temperature 0)"]
     CLS -- "other text" --> ERR["Rephrase message"]
+    REP --> CAP[/"Caption: Interpreted Symptom"/]
     REP --> SQL["generate_sql_query (gpt-4)"]
+    SQL --> EXP[/"Expander: generated SQL"/]
     SQL --> RUN["run_sql_query (database/db_connection.py)"]
+    PG[("PostgreSQL medicines_table")] --> RUN
     RUN -- "rows" --> SUM["summarize_medicines: one gpt-4 call per row"]
     RUN -- "no rows" --> NONE["No matching medicines message"]
-    SUM --> CHART["Matplotlib bar chart of Excellent_Review_Percent"]
+    SUM --> CHART[/"Matplotlib bar chart of Excellent_Review_Percent"/]
     GEN --> SAVE["Add reply to chat history and show it"]
     SUM --> SAVE
     NONE --> SAVE
     ERR --> SAVE
+    SAVE --> HUMAN{{"HUMAN<br/>a doctor or a pharmacist reviews<br/>every decision about a medicine"}}
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one symptom query
+
+```mermaid
+stateDiagram-v2
+    state "Message received" as Received
+    state "In chat history" as Stored
+    state "Classified" as Classified
+    state "General reply" as General
+    state "Please rephrase" as Rephrase
+    state "Clinical phrase" as Phrase
+    state "SQL statement" as Sql
+    state "Rows from medicines_table" as Rows
+    state "No matching medicines" as NoRows
+    state "Medicine cards" as Cards
+    state "Chart drawn or skipped" as Chart
+    state "Error reply" as Error
+    state "Reply in chat history" as Saved
+    [*] --> Received: st.chat_input
+    Received --> Stored: append user message
+    Stored --> Classified: classify_input_type
+    Classified --> General: general_chat
+    Classified --> Rephrase: any other text
+    Classified --> Phrase: symptom_query
+    Phrase --> Sql: generate_sql_query
+    Sql --> Rows: run_sql_query returns rows
+    Sql --> NoRows: no rows
+    Rows --> Cards: summarize_medicines
+    Cards --> Chart: Matplotlib
+    Stored --> Error: an exception in any step
+    General --> Saved
+    Rephrase --> Saved
+    NoRows --> Saved
+    Chart --> Saved
+    Error --> Saved
+    Saved --> [*]
+```
 
 1. The user types a message, for example "What to take for sore throat?".
 2. The app adds the message to the chat history in the Streamlit session.
@@ -277,11 +374,69 @@ flowchart TB
 A symptom query makes a maximum of 6 GPT-4 calls: classify, rewrite, SQL, and one summary for each of 3 rows.
 If a step raises an exception, the reply is `⚠️ Error: <message>`.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant APP as app.py
+    participant LLM as agents/llm_agent.py
+    participant SQLA as agents/sql_agent.py
+    participant OAI as OpenAI API, gpt-4
+    participant DBC as database/db_connection.py
+    participant PG as PostgreSQL
+
+    U->>APP: chat message
+    APP->>APP: append the user message to chat_history
+    APP->>LLM: classify_input_type(message)
+    LLM->>OAI: classification prompt, temperature 0
+    OAI-->>LLM: symptom_query
+    APP->>LLM: rephrase_symptom_for_sql(message)
+    LLM->>OAI: rewrite prompt, temperature 0
+    OAI-->>LLM: clinical phrase
+    APP-->>U: caption Interpreted Symptom
+    APP->>SQLA: generate_sql_query(phrase)
+    SQLA->>OAI: SQL prompt with 9 column names
+    OAI-->>SQLA: raw SQL text
+    APP-->>U: SQL in an expander
+    APP->>DBC: run_sql_query(sql)
+    DBC->>PG: execute the statement
+    PG-->>DBC: rows, 3 or fewer if the SQL obeys the prompt
+    DBC-->>APP: columns and rows
+    APP->>LLM: summarize_medicines(columns, rows)
+    loop For each row
+        LLM->>OAI: patient summary prompt
+        OAI-->>LLM: paragraph
+    end
+    LLM-->>APP: HTML medicine cards
+    APP-->>U: bar chart of Excellent_Review_Percent
+    APP->>APP: append the reply to chat_history
+    APP-->>U: reply with the medicine cards
+```
+
 ---
 
 ## 5. The chat app
 
 **Purpose.** Give one chat window for symptoms and general messages, and two information pages.
+
+```mermaid
+flowchart TD
+    START[/"streamlit run app.py"/] --> SB["Sidebar: page radio,<br/>announcement, caption"]
+    SB --> SEL{"Selected page"}
+    SEL -- "Home" --> INIT["Make chat_history<br/>if it does not exist"]
+    INIT --> SHOW["Show each earlier message"]
+    SHOW --> IN{"New chat_input?"}
+    IN -- "yes" --> FLOW["Chat flow of section 4.1"]
+    IN -- "no" --> CLR
+    FLOW --> CLR{"Clear Chat History<br/>button pressed?"}
+    CLR -- "yes" --> EMPTY["Empty chat_history,<br/>st.experimental_rerun"]
+    CLR -- "no" --> FOOT[/"Footer"/]
+    SEL -- "User Manual" --> HELP[/"Static help text"/]
+    SEL -- "About MedXpert" --> ABOUT[/"Purpose and authors"/]
+    START -.-> PL["Streamlit page list:<br/>pages/1_User_Manual.py, section 8"]
+```
 
 | Sidebar page | Contents |
 |---|---|
@@ -304,6 +459,25 @@ Streamlit also shows `pages/1_User_Manual.py` in its page list, because the file
 ## 6. The LLM agent
 
 **Purpose.** Hold the GPT prompts for the chat app. File: `agents/llm_agent.py`. The module uses the OpenAI v1 client (`from openai import OpenAI`).
+
+The diagram shows `summarize_medicines`, the function with the most steps.
+
+```mermaid
+flowchart TD
+    IN[/"columns and rows"/] --> E{"rows empty?"}
+    E -- "yes" --> SORRY[/"Sorry, no medicines message"/]
+    E -- "no" --> ROW["For each row: dict of columns,<br/>read 7 fields with defaults"]
+    ROW --> PR["Prompt: one warm paragraph,<br/>bold section titles, no bullet points"]
+    PR --> CALL{"gpt-4 call succeeds?"}
+    CALL -- "yes" --> TXT["Summary text"]
+    CALL -- "no" --> GE["GPT error text"]
+    TXT --> BR["New lines to br tags"]
+    GE --> BR
+    BR --> DIV["HTML div: name, img from Image_URL,<br/>summary paragraph"]
+    DIV --> MORE{"More rows?"}
+    MORE -- "yes" --> ROW
+    MORE -- "no" --> OUT[/"Joined HTML cards"/]
+```
 
 | Function | Model | Temperature | Input | Output |
 |---|---|---|---|---|
@@ -329,6 +503,17 @@ The rewrite prompt gives four examples: "ear pain" to "ear infection", "burning 
 ## 7. The SQL agent and the medicines table
 
 **Purpose.** Change a clinical phrase into one PostgreSQL query. File: `agents/sql_agent.py`.
+
+```mermaid
+flowchart LR
+    PH[/"Clinical phrase"/] --> PR["Prompt: table name, 9 column names,<br/>find synonyms, ILIKE on Uses,<br/>Medicine_Name, Composition"]
+    TN[/"table_name<br/>default medicines_table"/] --> PR
+    PR --> RULES["Sort by Excellent_Review_Percent DESC,<br/>limit 3, SQL only"]
+    RULES --> G["gpt-4 with the system message<br/>generate safe SQL queries"]
+    G --> STRIP["strip the answer"]
+    STRIP --> OUT[/"Raw SQL text, not checked"/]
+    OUT --> RUN["app.py: run_sql_query"]
+```
 
 | Input | Output |
 |---|---|
@@ -359,6 +544,23 @@ The rewrite prompt gives four examples: "ear pain" to "ear infection", "burning 
 
 These columns match the Kaggle "11,000+ Medicine Details" dataset. The repository has no script that loads this dataset into PostgreSQL.
 
+The diagram gives the columns that the SQL prompt names. The repository has no schema file, so the diagram shows each column type as `unknown`.
+
+```mermaid
+erDiagram
+    medicines_table {
+        unknown Medicine_Name
+        unknown Composition
+        unknown Uses
+        unknown Side_effects
+        unknown Image_URL
+        unknown Manufacturer
+        unknown Excellent_Review_Percent
+        unknown Average_Review_Percent
+        unknown Poor_Review_Percent
+    }
+```
+
 **Rules**
 
 - The app runs the generated SQL directly. No code checks that the statement is a `SELECT`. Use a read-only database role.
@@ -369,6 +571,21 @@ These columns match the Kaggle "11,000+ Medicine Details" dataset. The repositor
 ## 8. The user manual generator
 
 **Purpose.** Write a patient-level medicine manual in the language that the user types.
+
+```mermaid
+flowchart TD
+    IN[/"Medicine name and language,<br/>two text inputs"/] --> BTN{"Generate Manual<br/>button pressed?"}
+    BTN -- "yes" --> EMP{"A value empty?"}
+    EMP -- "yes" --> WARN[/"Warning: enter both values"/]
+    EMP -- "no" --> ROW["Fixed sample row: typed name +<br/>500mg Paracetamol, fixed uses,<br/>side effects, manufacturer, rating 89"]
+    ROW --> GEN["generate_user_manual:<br/>openai.ChatCompletion, gpt-4"]
+    GEN --> PR["Prompt: write in the language,<br/>8 parts, no disclaimers"]
+    PR --> OK{"Call succeeds?"}
+    OK -- "yes" --> MAN["Manual text"]
+    OK -- "no" --> ERR["Error text as the manual"]
+    MAN --> SHOW[/"Success message, manual,<br/>download name_manual.txt"/]
+    ERR --> SHOW
+```
 
 | Input | Output |
 |---|---|
@@ -396,6 +613,23 @@ These columns match the Kaggle "11,000+ Medicine Details" dataset. The repositor
 
 **Purpose.** Test semantic search over medicine text. These tools are not connected to the chat app.
 
+```mermaid
+flowchart LR
+    subgraph WRITE["Write"]
+        BQ["build_qdrant.py:<br/>make collection if absent,<br/>encode 3 samples, upsert"]
+    end
+    subgraph SEARCH["Search"]
+        Q1[/"Text box in<br/>qdrant_search_app.py"/] --> ENC["Encode with<br/>all-MiniLM-L6-v2"]
+        Q2[/"Fixed text dog in<br/>vector_test.py"/] --> ENC
+        Q3[/"Text box in<br/>chroma_test_app.py"/] --> ENC2["Encode with<br/>all-MiniLM-L6-v2"]
+    end
+    BQ --> QD[("Qdrant localhost:6333<br/>medxpert_medicines, 384, cosine")]
+    ENC --> QD
+    QD --> R1[/"Top 3: medicine_name,<br/>text, image_name, score"/]
+    ENC2 --> CH[("ChromaDB medxpert/chroma_db_fresh<br/>drug_images, no script makes it")]
+    CH --> R2[/"Top 3: first 200 characters,<br/>zip_file, image_name"/]
+```
+
 | Tool | Store | Collection | Query | Result |
 |---|---|---|---|---|
 | `build_qdrant.py` | Qdrant `localhost:6333` | `medxpert_medicines` | — | Makes the collection (384, cosine) if it does not exist, adds 3 samples: Paracetamol, Ibuprofen, Amoxicillin |
@@ -420,6 +654,37 @@ These columns match the Kaggle "11,000+ Medicine Details" dataset. The repositor
 
 **Purpose.** Change DailyMed SPL ZIP archives into text records and Qdrant points.
 
+```mermaid
+flowchart TD
+    DATA[/"data/dm_spl_monthly_update_month/<br/>category/*.zip"/] --> COLL["Make medxpert_medicines<br/>if it does not exist"]
+    COLL --> ZIP["For each ZIP file: extract to<br/>temp_extracted/random id"]
+    ZIP --> X{"Any XML file<br/>at the top level?"}
+    X -- "no" --> STOP["Stop for this ZIP file,<br/>temporary folder stays"]
+    X -- "yes" --> PARSE["parse_xml: 8 fields,<br/>namespace urn:hl7-org:v3,<br/>absent field = Not available"]
+    PARSE --> OCRI["Tesseract OCR on each .jpg and .png,<br/>copy each image to output/images"]
+    OCRI --> SUMM["Join the fields and the OCR text"]
+    SUMM --> TXT[("output/records/id.txt")]
+    SUMM --> EMB["Encode the summary"]
+    EMB --> QD[("Qdrant point: 8 fields, category,<br/>source_month, first image name")]
+    QD --> NEXT{"More XML files?"}
+    NEXT -- "yes" --> PARSE
+    NEXT -- "no" --> CLEAN["unlink each path, rmdir"]
+    CLEAN --> LOG[/"Processed line, or<br/>Failed line on an exception"/]
+    STOP --> LOG
+```
+
+```mermaid
+flowchart LR
+    Z[/"One fixed SPL ZIP file"/] --> IMG{"Any image<br/>in the ZIP?"}
+    IMG -- "no" --> NO[/"No image found, exit"/]
+    IMG -- "yes" --> FIRST["Open the first image"]
+    FIRST --> PREP["Grayscale, sharpen,<br/>auto-contrast"]
+    PREP --> DBG[("debug_extracted_image.jpg")]
+    PREP --> TES["Tesseract, lang eng"]
+    TES --> CLEAN["Collapse spaces, remove other<br/>characters, keep 800"]
+    CLEAN --> OUT[/"Printed clean text"/]
+```
+
 | Input | Output |
 |---|---|
 | `data/dm_spl_monthly_update_<month>/<category>/*.zip` | `output/records/<id>.txt`, `output/images/<month>/<category>/<image>`, one Qdrant point for each XML file |
@@ -433,7 +698,7 @@ These columns match the Kaggle "11,000+ Medicine Details" dataset. The repositor
 5. Read each `.jpg` and `.png` image with Tesseract OCR and copy the image to `output/images/`.
 6. Join the fields and the OCR text into one summary. Write it to `output/records/<id>.txt`.
 7. Encode the summary and add one point. The payload has the 8 fields, `category`, `source_month` and the first image name.
-8. Delete the temporary folder. Print one line for each ZIP file.
+8. Delete the temporary folder. Print one line for each ZIP file. If the ZIP file has no XML file at the top level, the script stops for that file before this step, and the temporary folder stays.
 
 **Procedure of `ocr_to_fields.py`**
 
@@ -454,6 +719,17 @@ These columns match the Kaggle "11,000+ Medicine Details" dataset. The repositor
 ## 11. The datasets
 
 The data is not in the repository. Git ignores `data/`, `output/`, `*.csv`, `*.json` and the images.
+
+```mermaid
+flowchart LR
+    DM[/"DailyMed SPL<br/>monthly ZIP archives"/] --> DI["dailymed_ingest_qdrant.py"]
+    DM --> OCR["ocr_to_fields.py"]
+    DI --> QD[("Qdrant medxpert_medicines")]
+    KG[/"Kaggle 11,000+<br/>Medicine Details"/] -.-> LOAD["Load by hand,<br/>no script in the repository"]
+    LOAD -.-> PG[("PostgreSQL medicines_table")]
+    PG --> APP["app.py symptom route"]
+    DB[/"DrugBank"/] -.-> NU["Not used, access pending"]
+```
 
 | Dataset | Source | Use in the code | Facts from `MedXpert.pptx` |
 |---|---|---|---|
@@ -508,7 +784,7 @@ The earlier README and the deck describe more features than the code has. This t
 | `.env` | No (git ignores it) | `OPENAI_API_KEY` |
 | `database/db_connection.py` | No (git ignores `database/`) | `run_sql_query(sql)`. Required by `app.py` |
 | `data/dm_spl_monthly_update_*/<category>/*.zip` | No (git ignores it) | DailyMed SPL archives |
-| `temp_extracted/` | No (git ignores it) | Temporary ZIP contents. Deleted after each ZIP file |
+| `temp_extracted/` | No (git ignores it) | Temporary ZIP contents. Deleted after each ZIP file that has an XML file |
 | `output/records/*.txt` | No (git ignores it) | One text record for each SPL XML file |
 | `output/images/<month>/<category>/` | No (git ignores it) | Copies of the label images |
 | `qdrant_data/` | No (git ignores it) | Local Qdrant storage |
@@ -558,6 +834,22 @@ OPENAI_API_KEY=your_key_here
 ```
 
 Write `database/db_connection.py` with a function `run_sql_query(sql)` that returns `(columns, rows)`. Then load the Kaggle table into PostgreSQL as `medicines_table` with the [9 columns](#7-the-sql-agent-and-the-medicines-table).
+
+The diagram shows the setup steps in sequence and the result of each OpenAI version.
+
+```mermaid
+flowchart TD
+    CL["git clone, python -m venv medenv"] --> REQ["pip install -r requirements.txt"]
+    REQ --> EXTRA["pip install matplotlib qdrant-client<br/>pytesseract Pillow"]
+    EXTRA --> VER{"Which openai version?"}
+    VER -- "openai 1.x" --> V1[/"Chat app works,<br/>manual page fails"/]
+    VER -- "openai 0.28.1" --> V0[/"Manual page works,<br/>chat app fails at import"/]
+    V1 --> ENV[".env with OPENAI_API_KEY"]
+    V0 --> ENV
+    ENV --> DBC["Write database/db_connection.py:<br/>run_sql_query returns columns, rows"]
+    DBC --> PG[("Load the Kaggle table as<br/>medicines_table")]
+    PG --> RUN["streamlit run app.py"]
+```
 
 ### 14.3 Run MedXpert
 
